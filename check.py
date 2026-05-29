@@ -17,6 +17,7 @@ import json
 import time
 import urllib.request
 import urllib.parse
+from datetime import datetime, timezone, timedelta
 
 # ── 설정 ──────────────────────────────────────────────
 SYMBOLS  = ["SOLUSDT", "BTCUSDT", "ETHUSDT"]   # 감시할 종목
@@ -27,6 +28,7 @@ VOL_LEN    = 20     # 거래량 평균 봉
 VOL_SPIKE  = 2.0    # 거래량 폭발 (평균배수)
 WICK_RATIO = 0.5    # 꼬리 비율 (전체 봉 대비)
 VOL_CONTR  = 0.7    # 직후 변동성 수축 비율
+LOOKBACK   = 1      # 최근 마감된 봉 중 검사할 개수 (중복 알림 방지를 위해 최신 1개만)
 
 # 텔레그램 (GitHub Secrets 또는 환경변수에서 읽음)
 TG_TOKEN = os.environ.get("TG_TOKEN", "")
@@ -61,22 +63,20 @@ def get_klines(symbol, interval, limit=50):
 
 
 # ── 체념 신호 검사 ────────────────────────────────────
-def check_signal(candles):
+def check_signal(candles, i):
     """
-    가장 최근에 '확정된' 봉을 현재봉(cur)으로 본다.
-    바이낸스 klines의 마지막 항목은 아직 진행 중인 봉이므로 제외(-1),
-    cur = candles[-2], prev = candles[-3].
+    candles[i]를 '현재봉(cur)'으로 보고 신호를 검사한다.
+    호출자가 진행 중인 봉(candles[-1])은 제외한 인덱스만 넘겨야 함.
+    prev = candles[i-1], 거래량 평균은 i 기준 직전 VOL_LEN개(cur 포함).
     반환: "롱" / "숏" / None
     """
-    if len(candles) < VOL_LEN + 3:
+    if i < VOL_LEN:
         return None
 
-    cur  = candles[-2]   # 직전에 막 마감된 봉 (= Pine의 현재봉)
-    prev = candles[-3]   # 그 앞 봉 (= Pine의 [1] 체념봉)
+    cur  = candles[i]
+    prev = candles[i - 1]
 
-    # 거래량 평균: cur 시점 기준 직전 VOL_LEN개 (cur 포함, Pine의 sma와 맞춤)
-    idx = candles.index(cur)
-    window = candles[idx - VOL_LEN + 1: idx + 1]
+    window = candles[i - VOL_LEN + 1 : i + 1]
     avg_vol = sum(c["vol"] for c in window) / len(window)
 
     # prev 봉 = 체념봉
@@ -122,31 +122,49 @@ def send_telegram(text):
         print(f"[텔레그램 전송 실패] {e}")
 
 
+# ── 시각 포맷 ─────────────────────────────────────────
+def fmt_kst(ts_ms):
+    kst = timezone(timedelta(hours=9))
+    return datetime.fromtimestamp(ts_ms / 1000, tz=kst).strftime("%Y-%m-%d %H:%M KST")
+
+
 # ── 메인 ──────────────────────────────────────────────
 def main():
-    fired = []
+    total_fired = 0
     for sym in SYMBOLS:
         try:
-            candles = get_klines(sym, INTERVAL, limit=VOL_LEN + 5)
-            sig = check_signal(candles)
-            if sig:
-                price = candles[-2]["close"]
+            candles = get_klines(sym, INTERVAL, limit=60)
+            last_closed = len(candles) - 2          # 진행 중인 봉(-1) 제외
+            start = max(VOL_LEN, last_closed - LOOKBACK + 1)
+
+            hits = 0
+            for i in range(start, last_closed + 1):
+                sig = check_signal(candles, i)
+                if not sig:
+                    continue
+                bar_time = fmt_kst(candles[i]["time"])
+                price = candles[i]["close"]
                 arrow = "🟢" if sig == "롱" else "🔴"
                 msg = (f"{arrow} <b>체념 신호 [{sig}]</b>\n"
                        f"종목: {sym}\n"
                        f"타임프레임: {INTERVAL}\n"
+                       f"봉 시각: {bar_time}\n"
                        f"종가: {price}")
                 send_telegram(msg)
-                fired.append(f"{sym} {sig}")
-                print(f"[신호] {sym} {sig} @ {price}")
-            else:
+                hits += 1
+                total_fired += 1
+                print(f"[신호] {sym} {sig} @ {price} ({bar_time})")
+
+            if hits == 0:
                 print(f"[신호없음] {sym}")
         except Exception as e:
             print(f"[오류] {sym}: {e}")
         time.sleep(0.3)  # API 매너
 
-    if not fired:
+    if total_fired == 0:
         print("이번 검사에서 신호 없음.")
+    else:
+        print(f"총 {total_fired}건 신호 전송.")
 
 
 if __name__ == "__main__":
