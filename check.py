@@ -32,7 +32,7 @@ VOL_CONTR  = 0.7    # 직후 변동성 수축 비율
 TG_TOKEN = os.environ.get("TG_TOKEN", "")
 TG_CHAT  = os.environ.get("TG_CHAT", "")
 
-BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
+BINANCE_KLINES = "https://data-api.binance.vision/api/v3/klines"
 
 
 # ── 바이낸스 캔들 가져오기 ────────────────────────────
